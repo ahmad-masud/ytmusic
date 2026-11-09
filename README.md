@@ -1,34 +1,58 @@
-# YouTube Music for macOS
+# YouTube Music
 
-A small native desktop app for [music.youtube.com](https://music.youtube.com): a
-`WKWebView` in a real Mac window, plus the things a browser tab cannot do —
-media keys, the Control Center **Now Playing** tile, a menu bar item, and
-playback that survives closing the window.
+A small native desktop app for [music.youtube.com](https://music.youtube.com) on
+**macOS and Windows**: the site in a real OS window — WKWebView on macOS,
+WebView2 on Windows — plus the things a browser tab cannot do. Media keys, the
+system now-playing surface, a tray item, and playback that survives closing the
+window.
 
 Written in Rust with [`tao`](https://github.com/tauri-apps/tao) +
-[`wry`](https://github.com/tauri-apps/wry), with a small Objective-C shim for
-the two AppKit frameworks that have no usable Rust bindings.
+[`wry`](https://github.com/tauri-apps/wry). The only platform-specific code is
+the system media layer, which has no cross-platform equivalent: an Objective-C
+shim for MediaPlayer.framework on macOS, WinRT `SystemMediaTransportControls`
+on Windows.
 
-**1.6 MB app bundle.** No Electron, no Node, no bundler, no npm install.
+**1.4 MB on macOS, 1.1 MB on Windows.** No Electron, no Node, no bundler, no
+npm install.
 
 ---
 
 ## Install
 
-### Download
+Both builds are on the [Releases](https://github.com/ahmad-masud/ytmusic/releases)
+page.
 
-Grab the universal build from [Releases](https://github.com/ahmad-masud/ytmusic/releases),
-unzip, and drag **YouTube Music.app** into `/Applications`.
+### macOS
+
+Universal (Apple Silicon + Intel), macOS 11 or later. Unzip and drag
+**YouTube Music.app** into `/Applications`.
 
 It is ad-hoc signed rather than notarised — there is no $99/year Apple
 Developer certificate behind it — so Gatekeeper blocks the first launch. Open
 the app once, then go to **System Settings ▸ Privacy & Security ▸ Open Anyway**.
 Or `xattr -dr com.apple.quarantine "/Applications/YouTube Music.app"`.
 
+### Windows
+
+x64, Windows 10 1809 or later. Unzip and run **YouTube Music.exe** — there is
+no installer and nothing to register. The MSVC runtime is linked statically, so
+you do not need the Visual C++ Redistributable.
+
+It needs the **WebView2 runtime**, which ships with Windows 11 and reaches most
+Windows 10 machines through Edge. If the window comes up blank, install the
+[Evergreen WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+and try again.
+
+The .exe is unsigned, so SmartScreen will show "Windows protected your PC" on
+first run. Click **More info ▸ Run anyway**. Code signing certificates start
+around $200/year; this project does not have one.
+
 ### Build from source
 
 This skips the Gatekeeper step entirely, because a locally compiled binary is
 never quarantined.
+
+On macOS:
 
 ```sh
 ./scripts/bundle.sh                # -> dist/YouTube Music.app
@@ -36,9 +60,16 @@ never quarantined.
 ./scripts/bundle.sh /Applications  # or install it straight away
 ```
 
-Requires a Rust toolchain and the Xcode command line tools. There are no other
-dependencies: `cargo build` compiles the Objective-C shim through the `cc`
-crate, and the icon is checked in.
+On Windows:
+
+```powershell
+cargo build --release              # -> target\release\ytmusic.exe
+```
+
+Requires a Rust toolchain, plus the Xcode command line tools on macOS. There
+are no other dependencies: `cargo build` compiles the Objective-C shim through
+the `cc` crate on macOS and embeds the icon through `winresource` on Windows,
+and both icons are checked in.
 
 The bundle is **ad-hoc signed**, which matters more than it sounds: WKWebView
 keys its cookie jar to the bundle identifier, so without a stable identity you
@@ -66,6 +97,9 @@ Worth knowing: Homebrew 7 removed `--no-quarantine`, so even a tap install is
 quarantined and still prompts on first launch. Only notarisation, or building
 from source, actually removes that step.
 
+winget has the same shape of problem on the Windows side: the manifest would be
+accepted, but an unsigned installer means SmartScreen still intervenes.
+
 ## The icon
 
 `packaging/ytmusic-mark.png` is YouTube Music's own 1024×1024 product icon,
@@ -74,11 +108,14 @@ when you install music.youtube.com as an app. `make-icon.swift` composites it
 onto a white rounded-square plate at macOS proportions, which is the treatment
 their real mobile icon already uses.
 
-The menu bar glyph is the same mark reduced to a silhouette and drawn in
+The tray glyph is the same mark reduced to its geometry and drawn at runtime in
 `src/icon.rs`: a filled disc with the ring and play triangle knocked out of it.
-The menu bar takes *template* images — AppKit uses only the alpha channel and
-recolours it per theme — so a full-colour logo would be wrong there, and
-unreadable at 18pt besides.
+The two platforms want different things from that one description — the macOS
+menu bar takes *template* images, where only the alpha channel is used and
+AppKit recolours it per theme, so the knockouts are holes; the Windows
+notification area and taskbar take full-colour icons, so the knockouts are
+painted white and the disc is YouTube red. `packaging/AppIcon.ico` carries the
+mark at seven sizes for the Windows executable.
 
 It is Google's trademark. Fine on your own machine; if you redistribute this,
 delete `packaging/ytmusic-mark.png` and the icon script falls back to a generic
@@ -86,17 +123,19 @@ music-note glyph that ships no one else's branding.
 
 ## What it does
 
-| | |
-|---|---|
-| **Media keys** | F7/F8/F9, Touch Bar, headphone and Bluetooth remotes, via `MPRemoteCommandCenter` |
-| **Now Playing** | Title, artist, album, artwork and a scrubbable progress bar in Control Center and on the lock screen |
-| **Menu bar** | Current track, play/pause, skip, like, always-on-top, quit |
-| **Close ≠ quit** | ⌘W hides the window and keeps playing; the Dock icon or the menu bar item brings it back |
-| **Native menus** | A real macOS menu bar with the shortcuts below |
-| **Remembers** | Window size and position, zoom level, always-on-top |
-| **External links** | Anything that is not Google or YouTube opens in your default browser |
+| | macOS | Windows |
+|---|---|---|
+| **Media keys** | F7/F8/F9, Touch Bar, headphone and Bluetooth remotes, via `MPRemoteCommandCenter` | Keyboard media keys via `SystemMediaTransportControls` |
+| **Now playing** | Title, artist, album, artwork and a scrubbable progress bar in Control Center and on the lock screen | The same, in the media flyout above the volume OSD |
+| **Tray** | Menu bar item showing the current track, with playback controls | Notification area icon; track in the tooltip, controls on right click, left click restores the window |
+| **Close ≠ quit** | ⌘W hides the window and keeps playing; the Dock icon brings it back | Ctrl+W hides it; the tray icon brings it back |
+| **Native menus** | Real application menu bar | Window menu bar on the HWND |
+| **Remembers** | Window size and position, zoom level, always-on-top | Same |
+| **External links** | Anything that is not Google or YouTube opens in your default browser | Same, via `ShellExecuteW` |
 
 ### Shortcuts
+
+⌘ on macOS, **Ctrl** on Windows.
 
 | | | | |
 |---|---|---|---|
@@ -113,8 +152,12 @@ music-note glyph that ships no one else's branding.
 
 ## Settings
 
-`~/Library/Application Support/YouTube Music/config.json`, written on quit and
-read on launch. There is no settings UI; edit the file.
+Written on quit and read on launch. There is no settings UI; edit the file.
+
+| | |
+|---|---|
+| macOS | `~/Library/Application Support/YouTube Music/config.json` |
+| Windows | `%APPDATA%\YouTube Music\config.json` |
 
 | Key | Default | |
 |---|---|---|
@@ -124,16 +167,20 @@ read on launch. There is no settings UI; edit the file.
 | `always_on_top` | `false` | Float above other windows |
 | `zoom` | `1.0` | Webview zoom factor |
 | `devtools` | `false` | Web inspector; costs ~60 MB of GPU-process memory |
-| `user_agent` | Safari 18.6 | See below |
+| `user_agent` | Safari 18.6 / empty | See below |
 | `start_url` | `https://music.youtube.com/` | |
 
 ### About the user agent
 
-WKWebView's stock user agent has no `Safari` token, which makes YouTube serve a
-degraded page and makes Google's sign-in refuse the "embedded browser". The app
-presents itself as Safari instead. If Google ever tightens this and sign-in
-starts failing, bump the `Version/` number in `user_agent` to match the Safari
-on your machine.
+On macOS this matters: WKWebView's stock user agent has no `Safari` token, which
+makes YouTube serve a degraded page and makes Google's sign-in refuse the
+"embedded browser". The app presents itself as Safari instead. If Google ever
+tightens this and sign-in starts failing, bump the `Version/` number in
+`user_agent` to match the Safari on your machine.
+
+On Windows there is nothing to fix, so the default is empty and the engine's own
+user agent is left alone: WebView2 already identifies as Edge, which YouTube
+Music serves its full desktop experience to.
 
 ## Development
 
@@ -157,15 +204,17 @@ written back to `config.json`.
 ### Layout
 
 ```
-src/main.rs        event loop, window, webview, action dispatch
-src/inject.js      runs inside the page: scrapes player state, exposes commands
-src/nowplaying.rs  safe wrapper over the Objective-C shim
-native/nowplaying.m  MPNowPlayingInfoCenter + MPRemoteCommandCenter
-src/menu.rs        macOS application menu
-src/tray.rs        menu bar item
-src/icon.rs        the menu bar glyph, rasterised at runtime
-src/config.rs      preferences and window geometry
-packaging/         Info.plist and the icon generator
+src/main.rs          event loop, window, webview, action dispatch
+src/inject.js        runs inside the page: scrapes player state, exposes commands
+src/media/mod.rs     platform-agnostic now-playing + media key API
+src/media/macos.rs     -> native/nowplaying.m (MPNowPlayingInfoCenter)
+src/media/windows.rs   -> SystemMediaTransportControls (WinRT)
+src/shell.rs         opening links, revealing folders, clipboard, raising the window
+src/menu.rs          application menu; NSMenu on macOS, HWND menu bar on Windows
+src/tray.rs          menu bar / notification area item
+src/icon.rs          the tray and window icons, rasterised at runtime
+src/config.rs        preferences and window geometry
+packaging/           Info.plist, both icons, the icon generator, Homebrew cask
 ```
 
 The split worth knowing: **`inject.js` is the only file that knows anything
@@ -177,7 +226,8 @@ a `PlayerState` struct.
 ## Performance
 
 Measured on an M-series Mac, app settled on the signed-out home page,
-`devtools: false`.
+`devtools: false`. The Windows build has not been profiled; WebView2 is
+Chromium rather than WebKit, so expect different numbers there.
 
 | | Memory (physical footprint) | CPU, 60 s idle |
 |---|---|---|
@@ -214,6 +264,14 @@ Three things were measured and fixed while writing this:
   updates. Verified both ways.
 
 ## Limitations
+
+- **The Windows build has not been hand-tested on Windows hardware.** It is
+  built, linted and packaged on a Windows runner in CI, and the binary is
+  verified to be a GUI-subsystem PE with no Visual C++ Redistributable
+  dependency — but nobody has yet watched it play a song. The
+  `SystemMediaTransportControls` integration in particular is typed against the
+  real WinRT API and compiles, which is not the same as working. Please open an
+  issue if something is off.
 
 - **Sign-in may be refused.** Google sometimes blocks logins from embedded
   browsers. Pretending to be Safari gets through today; if it stops, adjust

@@ -79,3 +79,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$env:GITHUB_REF_NAME" YouTube-Music-windows-x64.zip --clobber
+
+  # Inline checksums in release notes go stale the moment CI rebuilds and
+  # clobbers an asset, so the authoritative list is generated here, after both
+  # uploads have landed.
+  checksums:
+    name: Checksums
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p '*.zip' -D assets
+          cd assets
+          sha256sum *.zip | tee SHA256SUMS.txt
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt --clobber

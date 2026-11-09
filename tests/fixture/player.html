@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ytmusic fixture</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0; padding: 32px; background: #0d0d10; color: #eceef2;
+        font: 15px/1.5 -apple-system, system-ui, sans-serif;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      p  { color: #9aa0ab; margin: 0 0 24px; }
+      video { width: 320px; border-radius: 10px; background: #000; }
+      button {
+        font: inherit; padding: 7px 14px; margin: 4px 6px 0 0; border-radius: 8px;
+        border: 1px solid #2c2f36; background: #1a1c21; color: inherit; cursor: pointer;
+      }
+      button:hover { background: #22252b; }
+      code { color: #ff6b63; }
+    </style>
+  </head>
+  <body>
+    <h1>ytmusic fixture</h1>
+    <p>
+      Stands in for music.youtube.com so the IPC bridge, the window title, the menu
+      bar item and the Now&nbsp;Playing tile can be exercised without signing in.
+      Run with <code>YTMUSIC_DEBUG=1 YTMUSIC_START_URL=http://localhost:8765/player.html</code>.
+    </p>
+
+    <video id="player" muted playsinline></video>
+
+    <div>
+      <button data-track="0">Track A</button>
+      <button data-track="1">Track B</button>
+      <button id="toggle">Play / Pause</button>
+    </div>
+
+    <script>
+      // A canvas-backed MediaStream gives us a real <video> element that plays,
+      // with no media file to ship.
+      const canvas = document.createElement("canvas");
+      canvas.width = 320;
+      canvas.height = 180;
+      const ctx = canvas.getContext("2d");
+      let frame = 0;
+      setInterval(() => {
+        frame += 2;
+        ctx.fillStyle = `hsl(${frame % 360} 65% 42%)`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }, 100);
+
+      const player = document.getElementById("player");
+      player.srcObject = canvas.captureStream(10);
+      player.play().catch((e) => console.warn("autoplay blocked:", e));
+
+      const tracks = [
+        {
+          title: "Nightjar",
+          artist: "Halcyon Drift",
+          album: "Slow Horizons",
+          artwork: "https://www.gstatic.com/webp/gallery/4.jpg",
+        },
+        {
+          title: "Paper Lanterns",
+          artist: "Mira Vance",
+          album: "Little Fires",
+          artwork: "https://www.gstatic.com/webp/gallery/5.jpg",
+        },
+      ];
+
+      function select(index) {
+        const track = tracks[index];
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: track.title,
+          artist: track.artist,
+          album: track.album,
+          artwork: [{ src: track.artwork, sizes: "544x544", type: "image/jpeg" }],
+        });
+        navigator.mediaSession.playbackState = player.paused ? "paused" : "playing";
+      }
+
+      document.querySelectorAll("[data-track]").forEach((button) => {
+        button.addEventListener("click", () => select(Number(button.dataset.track)));
+      });
+
+      // The injected script drives playback through this button, exactly as it
+      // does with YouTube Music's own player bar.
+      const toggle = document.getElementById("toggle");
+      toggle.id = "play-pause-button";
+      toggle.addEventListener("click", () => {
+        if (player.paused) player.play();
+        else player.pause();
+      });
+
+      select(0);
+    </script>
+  </body>
+</html>

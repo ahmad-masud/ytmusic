@@ -1,0 +1,26 @@
+[package]
+name = "ytmusic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A lightweight native macOS desktop app for YouTube Music"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+tao = "0.37"
+wry = { version = "0.57", features = ["devtools"] }
+muda = "0.21"
+tray-icon = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "7"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

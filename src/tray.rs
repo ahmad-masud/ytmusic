@@ -80,12 +80,23 @@ impl Tray {
             &quit,
         ])?;
 
-        let icon = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            .with_tooltip("YouTube Music");
+
+        // macOS wants a template image and opens the menu on left click.
+        // Windows wants a full-colour icon, and left click should restore the
+        // window while right click opens the menu.
+        #[cfg(target_os = "macos")]
+        let builder = builder
             .with_icon_templated(icon::tray_icon()?)
-            .with_menu_on_left_click(true)
-            .with_tooltip("YouTube Music")
-            .build()?;
+            .with_menu_on_left_click(true);
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder
+            .with_icon(icon::tray_icon()?)
+            .with_menu_on_left_click(false);
+
+        let icon = builder.build()?;
 
         Ok(Self {
             icon,
@@ -137,11 +148,24 @@ impl Tray {
         self.like.set_enabled(next.has_track);
         self.dislike.set_enabled(next.has_track);
 
+        // The menu bar can show the track next to the icon; the Windows
+        // notification area has no such thing, so it goes in the tooltip.
+        #[cfg(target_os = "macos")]
         self.icon.set_title(if self.show_title && next.has_track {
             Some(state.tray_label(TITLE_CHARS))
         } else {
             None
         });
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (&self.show_title, TITLE_CHARS);
+            let tooltip = if next.has_track {
+                format!("YouTube Music — {}", next.title)
+            } else {
+                "YouTube Music".to_string()
+            };
+            let _ = self.icon.set_tooltip(Some(tooltip));
+        }
 
         *self.last.borrow_mut() = Some(next);
     }

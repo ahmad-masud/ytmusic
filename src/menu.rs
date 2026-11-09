@@ -1,16 +1,19 @@
-//! The macOS application menu.
+//! The application menu.
+//!
+//! macOS gets a real menu bar owned by the application; Windows gets a window
+//! menu bar attached to the HWND. The playback, view and edit submenus are
+//! shared — only the platform shell around them differs, along with the
+//! modifier key (`CMD_OR_CTRL` is Command on macOS and Control elsewhere).
 
 use std::cell::RefCell;
 
-use muda::accelerator::{Accelerator, Code, Modifiers};
+use muda::accelerator::{Accelerator, CMD_OR_CTRL, Code, Modifiers};
 use muda::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tao::window::Window;
 
 use crate::action::Action;
 use crate::config::Config;
-
-const CMD: Modifiers = Modifiers::META;
-const CMD_SHIFT: Modifiers = Modifiers::META.union(Modifiers::SHIFT);
-const CMD_ALT: Modifiers = Modifiers::META.union(Modifiers::ALT);
+use crate::state::PlayerState;
 
 fn key(mods: Modifiers, code: Code) -> Option<Accelerator> {
     Some(Accelerator::new(mods, code))
@@ -20,9 +23,22 @@ fn item(action: Action, label: &str, accelerator: Option<Accelerator>) -> MenuIt
     MenuItem::with_id(action.id(), label, true, accelerator)
 }
 
+fn about_metadata() -> AboutMetadata {
+    AboutMetadata {
+        name: Some("YouTube Music".into()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        comments: Some(
+            "An unofficial desktop wrapper for music.youtube.com.\n\
+             Not affiliated with Google or YouTube."
+                .into(),
+        ),
+        ..Default::default()
+    }
+}
+
 /// The parts of the player state that change what a menu item says. Snapshots
 /// of this are compared so a 1 Hz state update does not turn into a dozen
-/// Objective-C calls per second for labels that did not change.
+/// platform calls per second for labels that did not change.
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct Rendered {
     playing: bool,
@@ -35,48 +51,19 @@ struct Rendered {
 pub struct AppMenu {
     /// Kept alive for as long as the app runs; dropping it tears down the menu.
     _root: Menu,
-    pub play_pause: MenuItem,
-    pub like: MenuItem,
-    pub dislike: MenuItem,
+    play_pause: MenuItem,
+    like: MenuItem,
+    dislike: MenuItem,
     pub always_on_top: CheckMenuItem,
     last: RefCell<Option<Rendered>>,
 }
 
 impl AppMenu {
-    pub fn build(config: &Config) -> muda::Result<Self> {
-        let root = Menu::new();
-
-        // --- Application -----------------------------------------------------
-        let about = PredefinedMenuItem::about(
-            Some("About YouTube Music"),
-            Some(AboutMetadata {
-                name: Some("YouTube Music".into()),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
-                comments: Some(
-                    "An unofficial desktop wrapper for music.youtube.com.\n\
-                     Not affiliated with Google or YouTube."
-                        .into(),
-                ),
-                ..Default::default()
-            }),
-        );
-        let app_menu = Submenu::with_items(
-            "YouTube Music",
-            true,
-            &[
-                &about,
-                &PredefinedMenuItem::separator(),
-                &item(Action::RevealConfig, "Open Settings Folder…", None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::services(None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::hide(None),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::show_all(None),
-                &PredefinedMenuItem::separator(),
-                &item(Action::Quit, "Quit YouTube Music", key(CMD, Code::KeyQ)),
-            ],
-        )?;
+    pub fn build(config: &Config, window: &Window) -> muda::Result<Self> {
+        let _ = window; // only the Windows build needs the HWND
+        let cmd = CMD_OR_CTRL;
+        let cmd_shift = cmd | Modifiers::SHIFT;
+        let cmd_alt = cmd | Modifiers::ALT;
 
         // --- Edit ------------------------------------------------------------
         let edit_menu = Submenu::with_items(
@@ -94,47 +81,47 @@ impl AppMenu {
         )?;
 
         // --- Playback --------------------------------------------------------
-        let play_pause = item(Action::PlayPause, "Play", key(CMD, Code::KeyP));
-        let like = item(Action::Like, "Like", key(CMD_SHIFT, Code::KeyL));
-        let dislike = item(Action::Dislike, "Dislike", key(CMD_SHIFT, Code::KeyD));
+        let play_pause = item(Action::PlayPause, "Play", key(cmd, Code::KeyP));
+        let like = item(Action::Like, "Like", key(cmd_shift, Code::KeyL));
+        let dislike = item(Action::Dislike, "Dislike", key(cmd_shift, Code::KeyD));
         let playback_menu = Submenu::with_items(
             "Playback",
             true,
             &[
                 &play_pause,
                 &PredefinedMenuItem::separator(),
-                &item(Action::Next, "Next Track", key(CMD_SHIFT, Code::ArrowRight)),
+                &item(Action::Next, "Next Track", key(cmd_shift, Code::ArrowRight)),
                 &item(
                     Action::Previous,
                     "Previous Track",
-                    key(CMD_SHIFT, Code::ArrowLeft),
+                    key(cmd_shift, Code::ArrowLeft),
                 ),
                 &PredefinedMenuItem::separator(),
                 &item(
                     Action::SeekForward,
                     "Skip Forward 10s",
-                    key(CMD_SHIFT, Code::Period),
+                    key(cmd_shift, Code::Period),
                 ),
                 &item(
                     Action::SeekBackward,
                     "Skip Back 10s",
-                    key(CMD_SHIFT, Code::Comma),
+                    key(cmd_shift, Code::Comma),
                 ),
                 &PredefinedMenuItem::separator(),
-                &item(Action::VolumeUp, "Volume Up", key(CMD_SHIFT, Code::ArrowUp)),
+                &item(Action::VolumeUp, "Volume Up", key(cmd_shift, Code::ArrowUp)),
                 &item(
                     Action::VolumeDown,
                     "Volume Down",
-                    key(CMD_SHIFT, Code::ArrowDown),
+                    key(cmd_shift, Code::ArrowDown),
                 ),
-                &item(Action::ToggleMute, "Mute", key(CMD_SHIFT, Code::KeyM)),
+                &item(Action::ToggleMute, "Mute", key(cmd_shift, Code::KeyM)),
                 &PredefinedMenuItem::separator(),
                 &like,
                 &dislike,
-                &item(Action::Shuffle, "Shuffle", key(CMD_SHIFT, Code::KeyS)),
+                &item(Action::Shuffle, "Shuffle", key(cmd_shift, Code::KeyS)),
                 &item(Action::Repeat, "Cycle Repeat Mode", None),
                 &PredefinedMenuItem::separator(),
-                &item(Action::CopyLink, "Copy Song Link", key(CMD_SHIFT, Code::KeyC)),
+                &item(Action::CopyLink, "Copy Song Link", key(cmd_shift, Code::KeyC)),
                 &item(Action::OpenInBrowser, "Open Song in Browser", None),
             ],
         )?;
@@ -147,41 +134,45 @@ impl AppMenu {
             config.always_on_top,
             None,
         );
-        let mut view_items: Vec<&dyn muda::IsMenuItem> = Vec::new();
-        let reload = item(Action::Reload, "Reload", key(CMD, Code::KeyR));
+        let reload = item(Action::Reload, "Reload", key(cmd, Code::KeyR));
         let hard_reload = item(
             Action::HardReload,
             "Reload Ignoring Cache",
-            key(CMD_SHIFT, Code::KeyR),
+            key(cmd_shift, Code::KeyR),
         );
-        let back = item(Action::Back, "Back", key(CMD, Code::BracketLeft));
-        let forward = item(Action::Forward, "Forward", key(CMD, Code::BracketRight));
-        let home = item(Action::Home, "Home", key(CMD_SHIFT, Code::KeyH));
-        let search = item(Action::Search, "Search…", key(CMD, Code::KeyF));
-        let zoom_in = item(Action::ZoomIn, "Zoom In", key(CMD, Code::Equal));
-        let zoom_out = item(Action::ZoomOut, "Zoom Out", key(CMD, Code::Minus));
-        let zoom_reset = item(Action::ZoomReset, "Actual Size", key(CMD, Code::Digit0));
+        let back = item(Action::Back, "Back", key(cmd, Code::BracketLeft));
+        let forward = item(Action::Forward, "Forward", key(cmd, Code::BracketRight));
+        let home = item(Action::Home, "Home", key(cmd_shift, Code::KeyH));
+        let search = item(Action::Search, "Search…", key(cmd, Code::KeyF));
+        let zoom_in = item(Action::ZoomIn, "Zoom In", key(cmd, Code::Equal));
+        let zoom_out = item(Action::ZoomOut, "Zoom Out", key(cmd, Code::Minus));
+        let zoom_reset = item(Action::ZoomReset, "Actual Size", key(cmd, Code::Digit0));
+        // macOS-native menu action; Windows has no predefined equivalent.
+        #[cfg(target_os = "macos")]
         let fullscreen = PredefinedMenuItem::fullscreen(None);
         let devtools = item(
             Action::DevTools,
             "Toggle Developer Tools",
-            key(CMD_ALT, Code::KeyI),
+            key(cmd_alt, Code::KeyI),
         );
         let separators: Vec<PredefinedMenuItem> =
             (0..4).map(|_| PredefinedMenuItem::separator()).collect();
 
-        view_items.push(&reload);
-        view_items.push(&hard_reload);
-        view_items.push(&separators[0]);
-        view_items.push(&back);
-        view_items.push(&forward);
-        view_items.push(&home);
-        view_items.push(&search);
-        view_items.push(&separators[1]);
-        view_items.push(&zoom_in);
-        view_items.push(&zoom_out);
-        view_items.push(&zoom_reset);
-        view_items.push(&separators[2]);
+        let mut view_items: Vec<&dyn muda::IsMenuItem> = vec![
+            &reload,
+            &hard_reload,
+            &separators[0],
+            &back,
+            &forward,
+            &home,
+            &search,
+            &separators[1],
+            &zoom_in,
+            &zoom_out,
+            &zoom_reset,
+            &separators[2],
+        ];
+        #[cfg(target_os = "macos")]
         view_items.push(&fullscreen);
         view_items.push(&always_on_top);
         if config.devtools {
@@ -190,29 +181,88 @@ impl AppMenu {
         }
         let view_menu = Submenu::with_items("View", true, &view_items)?;
 
-        // --- Window ----------------------------------------------------------
-        let window_menu = Submenu::with_items(
-            "Window",
-            true,
-            &[
-                &PredefinedMenuItem::minimize(None),
-                &PredefinedMenuItem::zoom(None),
-                // Deliberately *not* `close_window`: closing the window should
-                // hide it and keep the music going.
-                &item(Action::HideWindow, "Close Window", key(CMD, Code::KeyW)),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::bring_all_to_front(None),
-            ],
-        )?;
+        let root = Menu::new();
 
-        root.append_items(&[
-            &app_menu,
-            &edit_menu,
-            &playback_menu,
-            &view_menu,
-            &window_menu,
-        ])?;
-        root.init_for_nsapp();
+        #[cfg(target_os = "macos")]
+        {
+            let app_menu = Submenu::with_items(
+                "YouTube Music",
+                true,
+                &[
+                    &PredefinedMenuItem::about(
+                        Some("About YouTube Music"),
+                        Some(about_metadata()),
+                    ),
+                    &PredefinedMenuItem::separator(),
+                    &item(Action::RevealConfig, "Open Settings Folder…", None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::services(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::hide_others(None),
+                    &PredefinedMenuItem::show_all(None),
+                    &PredefinedMenuItem::separator(),
+                    &item(Action::Quit, "Quit YouTube Music", key(cmd, Code::KeyQ)),
+                ],
+            )?;
+            let window_menu = Submenu::with_items(
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::zoom(None),
+                    // Deliberately not `close_window`: closing the window should
+                    // hide it and keep the music going.
+                    &item(Action::HideWindow, "Close Window", key(cmd, Code::KeyW)),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::bring_all_to_front(None),
+                ],
+            )?;
+            root.append_items(&[
+                &app_menu,
+                &edit_menu,
+                &playback_menu,
+                &view_menu,
+                &window_menu,
+            ])?;
+            root.init_for_nsapp();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let file_menu = Submenu::with_items(
+                "File",
+                true,
+                &[
+                    &item(Action::HideWindow, "Close Window", key(cmd, Code::KeyW)),
+                    &item(Action::RevealConfig, "Open Settings Folder…", None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::separator(),
+                    &item(Action::Quit, "Exit", key(cmd, Code::KeyQ)),
+                ],
+            )?;
+            let help_menu = Submenu::with_items(
+                "Help",
+                true,
+                &[&PredefinedMenuItem::about(
+                    Some("About YouTube Music"),
+                    Some(about_metadata()),
+                )],
+            )?;
+            root.append_items(&[
+                &file_menu,
+                &edit_menu,
+                &playback_menu,
+                &view_menu,
+                &help_menu,
+            ])?;
+
+            use tao::platform::windows::WindowExtWindows;
+            // Safe: the HWND comes straight from the window we own and is alive
+            // for as long as this menu is.
+            unsafe { root.init_for_hwnd(window.hwnd())? };
+        }
 
         Ok(Self {
             _root: root,
@@ -224,7 +274,7 @@ impl AppMenu {
         })
     }
 
-    pub fn sync(&self, state: &crate::state::PlayerState) {
+    pub fn sync(&self, state: &PlayerState) {
         let next = Rendered {
             playing: state.playing,
             has_player: state.has_player,
@@ -237,16 +287,16 @@ impl AppMenu {
         *self.last.borrow_mut() = Some(next);
 
         self.play_pause
-            .set_text(if state.playing { "Pause" } else { "Play" });
-        self.play_pause.set_enabled(state.has_player);
+            .set_text(if next.playing { "Pause" } else { "Play" });
+        self.play_pause.set_enabled(next.has_player);
         self.like
-            .set_text(if state.liked == 1 { "Remove Like" } else { "Like" });
-        self.dislike.set_text(if state.liked == -1 {
+            .set_text(if next.liked == 1 { "Remove Like" } else { "Like" });
+        self.dislike.set_text(if next.liked == -1 {
             "Remove Dislike"
         } else {
             "Dislike"
         });
-        self.like.set_enabled(state.has_track());
-        self.dislike.set_enabled(state.has_track());
+        self.like.set_enabled(next.has_track);
+        self.dislike.set_enabled(next.has_track);
     }
 }

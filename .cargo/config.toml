@@ -1,0 +1,5 @@
+# Link the MSVC runtime statically so the distributed .exe does not depend on
+# the Visual C++ Redistributable being installed. VCRUNTIME140.dll is not part
+# of a clean Windows install, and "the app won't start" is a bad first run.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

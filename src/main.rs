@@ -1,24 +1,31 @@
-//! A native macOS desktop app for YouTube Music.
+//! A native desktop app for YouTube Music, on macOS and Windows.
 //!
-//! Architecture: one `tao` window hosting one `wry` (WKWebView) view pointed at
-//! music.youtube.com. `src/inject.js` runs inside the page and reports what the
-//! player is doing; the Rust side turns that into a window title, a menu bar
-//! item, and a system Now Playing entry, and sends commands back the other way.
+//! Architecture: one `tao` window hosting one `wry` webview — WKWebView on
+//! macOS, WebView2 on Windows — pointed at music.youtube.com.
+//! `src/inject.js` runs inside the page and reports what the player is doing;
+//! the Rust side turns that into a window title, a tray item, and a system
+//! media session, and sends commands back the other way.
 //!
 //! The web page is the UI. Everything Rust adds is the part a browser tab
-//! cannot do: media keys, Control Center, a menu bar item, and staying alive
-//! with the window closed.
+//! cannot do: media keys, the OS now-playing surface, a tray item, and staying
+//! alive with the window closed.
+//!
+//! Platform-specific code is confined to `media/`, `shell.rs`, and the `cfg`
+//! branches in `menu.rs`, `tray.rs` and `icon.rs`.
+
+// Don't pop a console window alongside the GUI on Windows.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod action;
 mod config;
 mod icon;
+mod media;
 mod menu;
-mod nowplaying;
+mod shell;
 mod state;
 mod tray;
 
 use std::error::Error;
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -30,8 +37,8 @@ use wry::{BackgroundThrottlingPolicy, NewWindowResponse, WebView, WebViewBuilder
 
 use action::Action;
 use config::{Config, HOME_URL};
+use media::{NowPlaying, RemoteCommand};
 use menu::AppMenu;
-use nowplaying::RemoteCommand;
 use state::{IpcMessage, PlayerState};
 use tray::Tray;
 
@@ -40,10 +47,11 @@ const INJECTED_SCRIPT: &str = include_str!("inject.js");
 /// Window moves and resizes arrive in a flood while dragging; coalesce them.
 const GEOMETRY_FLUSH: Duration = Duration::from_secs(3);
 
-/// macOS retires a Now Playing session that stops being refreshed, so the
-/// change-driven updates need a floor. Measured: the tile survives at this
-/// interval and disappears if we only publish on change.
-const NOW_PLAYING_HEARTBEAT: Duration = Duration::from_secs(5);
+/// The OS retires a media session that stops being refreshed, so the
+/// change-driven updates need a floor. Measured on macOS: the tile survives at
+/// this interval and disappears if we only publish on change.
+const MEDIA_HEARTBEAT: Duration = Duration::from_secs(5);
+
 const ZOOM_STEP: f64 = 1.1;
 
 #[derive(Debug)]
@@ -52,11 +60,14 @@ enum UserEvent {
     Ipc(String),
     /// A menu id from either the app menu or the tray menu.
     Menu(String),
-    /// A media key or Control Center command.
+    /// A media key or system transport command.
     Remote(RemoteCommand, f64),
+    /// The tray icon was clicked (Windows; macOS opens the menu instead).
+    TrayClick,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    attach_console();
     let config = Config::load();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -64,16 +75,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let window = build_window(&config, &event_loop)?;
 
-    // Must happen after the event loop exists: both need a live NSApplication.
-    let app_menu = AppMenu::build(&config)?;
+    // After the window: the Windows menu bar attaches to its HWND, and both
+    // platforms need a live event loop first.
+    let app_menu = AppMenu::build(&config, &window)?;
     let tray = Tray::build(&config)?;
 
     let webview = build_webview(&config, &window, proxy.clone())?;
 
     forward_menu_events(proxy.clone());
+    forward_tray_events(proxy.clone());
+
     if config.native_now_playing {
+        // After the webview, so COM is already initialised on this thread by
+        // WebView2 before we ask WinRT for the transport controls.
         let remote = Mutex::new(proxy.clone());
-        nowplaying::init(move |command, value| {
+        media::init(&window, move |command, value| {
             if let Ok(proxy) = remote.lock() {
                 let _ = proxy.send_event(UserEvent::Remote(command, value));
             }
@@ -92,7 +108,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..
             } => {
                 if app.config.close_to_tray {
-                    hide_window(&window);
+                    window.set_visible(false);
                     app.config.save();
                 } else {
                     exit = true;
@@ -104,8 +120,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ..
             } => app.capture_geometry(&window),
 
-            // Clicking the Dock icon while the window is hidden.
-            Event::Reopen { .. } => show_window(&window),
+            // Clicking the Dock icon on macOS while the window is hidden.
+            Event::Reopen { .. } => shell::bring_to_front(&window),
+
+            Event::UserEvent(UserEvent::TrayClick) => shell::bring_to_front(&window),
 
             Event::UserEvent(UserEvent::Ipc(payload)) => {
                 app.handle_ipc(&payload, &window, &webview, &app_menu, &tray);
@@ -123,7 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             Event::LoopDestroyed => {
                 app.config.save();
-                nowplaying::clear();
+                media::clear();
             }
 
             _ => {}
@@ -136,6 +154,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
     });
 }
+
+/// The release build is a GUI subsystem binary, so it has no console and
+/// `eprintln!` goes nowhere. When run from a terminal with YTMUSIC_DEBUG set,
+/// borrow the parent's console so the diagnostics are actually visible.
+#[cfg(target_os = "windows")]
+fn attach_console() {
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+
+    if std::env::var("YTMUSIC_DEBUG").is_ok() {
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_console() {}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -155,6 +188,13 @@ fn build_window<T: 'static>(
         builder = builder.with_position(LogicalPosition::new(x, y));
     }
 
+    // macOS takes the icon from the bundle's .icns; Windows needs it set here
+    // for the title bar, taskbar and Alt-Tab.
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.with_window_icon(icon::window_icon());
+    }
+
     let window = builder.build(event_loop)?;
     if config.window.maximized {
         window.set_maximized(true);
@@ -172,9 +212,8 @@ fn build_webview(
     let start_url = config.start_url().to_ascii_lowercase();
     let allow_loopback = is_loopback(host_of(&start_url));
 
-    let webview = WebViewBuilder::new()
+    let mut builder = WebViewBuilder::new()
         .with_url(config.start_url())
-        .with_user_agent(&config.user_agent)
         .with_initialization_script_for_main_only(INJECTED_SCRIPT, true)
         .with_ipc_handler(move |request| {
             let _ = proxy.send_event(UserEvent::Ipc(request.into_body()));
@@ -191,15 +230,22 @@ fn build_webview(
         .with_navigation_handler(move |url| match classify(&url, allow_loopback) {
             Destination::Internal => true,
             Destination::External => {
-                open_externally(&url);
+                shell::open_externally(&url);
                 false
             }
         })
         .with_new_window_req_handler(|url, _features| {
-            open_externally(&url);
+            shell::open_externally(&url);
             NewWindowResponse::Deny
-        })
-        .build(window)?;
+        });
+
+    // Empty means "use the engine's own user agent", which is what we want on
+    // Windows: WebView2 already identifies as Edge, which YouTube serves well.
+    if !config.user_agent.trim().is_empty() {
+        builder = builder.with_user_agent(&config.user_agent);
+    }
+
+    let webview = builder.build(window)?;
 
     if (config.zoom - 1.0).abs() > f64::EPSILON {
         let _ = webview.zoom(config.zoom);
@@ -218,6 +264,32 @@ fn forward_menu_events(proxy: EventLoopProxy<UserEvent>) {
     }));
 }
 
+fn forward_tray_events(proxy: EventLoopProxy<UserEvent>) {
+    use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+
+    let proxy = Mutex::new(proxy);
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        // On macOS the left click opens the menu, so only Windows reaches here
+        // with something to do.
+        let restore = matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }
+        );
+        if restore
+            && let Ok(proxy) = proxy.lock()
+        {
+            let _ = proxy.send_event(UserEvent::TrayClick);
+        }
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -225,9 +297,9 @@ fn forward_menu_events(proxy: EventLoopProxy<UserEvent>) {
 struct App {
     config: Config,
     state: PlayerState,
-    /// Set while we own the system Now Playing entry.
-    now_playing_active: bool,
-    /// When we last pushed to MPNowPlayingInfoCenter.
+    /// Set while we own the system media session.
+    media_active: bool,
+    /// When we last published to the OS media session.
     last_published: Option<Instant>,
     /// When the debounced geometry write is due.
     pending_save: Option<Instant>,
@@ -238,7 +310,7 @@ impl App {
         Self {
             config,
             state: PlayerState::default(),
-            now_playing_active: false,
+            media_active: false,
             last_published: None,
             pending_save: None,
         }
@@ -262,57 +334,60 @@ impl App {
                 let _ = webview.zoom(self.config.zoom);
             }
             Ok(IpcMessage::Log(message)) => eprintln!("ytmusic[page]: {message}"),
-            Ok(IpcMessage::CopyLink(url)) => nowplaying::copy_to_clipboard(&url),
+            Ok(IpcMessage::CopyLink(url)) => shell::copy_to_clipboard(&url),
             Err(err) => eprintln!("ytmusic: unreadable IPC payload ({err}): {payload}"),
         }
     }
 
     fn on_state(&mut self, next: PlayerState, window: &Window, app_menu: &AppMenu, tray: &Tray) {
-        // MPNowPlayingInfoCenter interpolates the Control Center scrubber from
-        // the elapsed time and the playback rate, so a per-second republish is
-        // mostly wasted work. It cannot be dropped entirely, though: a session
-        // that stops refreshing is retired by the system and the tile vanishes.
-        // So: publish on anything the system cannot infer, plus a heartbeat.
+        // Both platforms interpolate the scrubber from elapsed + playback rate,
+        // so a per-second republish is mostly wasted work. It cannot be dropped
+        // entirely though: a session that stops refreshing is retired by the OS
+        // and the tile vanishes. So: publish on anything it cannot infer, plus
+        // a heartbeat.
         let track_changed = next.track_changed(&self.state);
         let transport_changed = next.playing != self.state.playing;
         let seeked = (next.elapsed - self.state.elapsed).abs() > 2.0;
         let heartbeat_due = self
             .last_published
-            .is_none_or(|at| at.elapsed() >= NOW_PLAYING_HEARTBEAT);
-        let republish = track_changed
-            || transport_changed
-            || seeked
-            || heartbeat_due
-            || !self.now_playing_active;
+            .is_none_or(|at| at.elapsed() >= MEDIA_HEARTBEAT);
+        let republish =
+            track_changed || transport_changed || seeked || heartbeat_due || !self.media_active;
 
-        if next.track_changed(&self.state) {
+        if track_changed {
             window.set_title(&next.window_title());
             if self.config.debug {
                 eprintln!(
                     "ytmusic[track] {} | artwork={}",
                     next.window_title(),
-                    if next.artwork.is_empty() { "none" } else { &next.artwork }
+                    if next.artwork.is_empty() {
+                        "none"
+                    } else {
+                        &next.artwork
+                    }
                 );
             }
         }
         self.state = next;
 
         if self.config.native_now_playing {
-            if self.state.has_track() && republish {
-                nowplaying::update(
-                    &self.state.title,
-                    &self.state.artist,
-                    &self.state.album,
-                    &self.state.artwork,
-                    self.state.duration,
-                    self.state.elapsed,
-                    self.state.playing,
-                );
-                self.now_playing_active = true;
-                self.last_published = Some(Instant::now());
-            } else if self.now_playing_active && !self.state.has_track() {
-                nowplaying::clear();
-                self.now_playing_active = false;
+            if self.state.has_track() {
+                if republish {
+                    media::update(&NowPlaying {
+                        title: &self.state.title,
+                        artist: &self.state.artist,
+                        album: &self.state.album,
+                        artwork_url: &self.state.artwork,
+                        duration: self.state.duration,
+                        elapsed: self.state.elapsed,
+                        playing: self.state.playing,
+                    });
+                    self.media_active = true;
+                    self.last_published = Some(Instant::now());
+                }
+            } else if self.media_active {
+                media::clear();
+                self.media_active = false;
             }
         }
 
@@ -344,9 +419,9 @@ impl App {
             Action::Back => drop(webview.go_back()),
             Action::Forward => drop(webview.go_forward()),
 
-            Action::ShowWindow => show_window(window),
+            Action::ShowWindow => shell::bring_to_front(window),
             Action::HideWindow => {
-                hide_window(window);
+                window.set_visible(false);
                 self.config.save();
             }
 
@@ -371,32 +446,25 @@ impl App {
                 }
             }
 
-            Action::CopyLink => {
-                let url = if self.state.url.is_empty() {
-                    HOME_URL
-                } else {
-                    &self.state.url
-                };
-                nowplaying::copy_to_clipboard(url);
-            }
-            Action::OpenInBrowser => {
-                open_externally(if self.state.url.is_empty() {
-                    HOME_URL
-                } else {
-                    &self.state.url
-                });
-            }
+            Action::CopyLink => shell::copy_to_clipboard(self.current_url()),
+            Action::OpenInBrowser => shell::open_externally(self.current_url()),
             Action::RevealConfig => {
                 let dir = Config::dir();
                 let _ = std::fs::create_dir_all(&dir);
-                if let Some(path) = dir.to_str() {
-                    reveal_in_finder(path);
-                }
+                shell::reveal_path(&dir);
             }
 
             // Handled by the caller, or mapped to a page command above.
             Action::Quit => {}
             _ => {}
+        }
+    }
+
+    fn current_url(&self) -> &str {
+        if self.state.url.is_empty() {
+            HOME_URL
+        } else {
+            &self.state.url
         }
     }
 
@@ -479,17 +547,6 @@ fn call_page(webview: &WebView, command: &str, argument: Option<f64>) {
     }
 }
 
-fn show_window(window: &Window) {
-    window.set_visible(true);
-    window.set_minimized(false);
-    window.set_focus();
-    nowplaying::activate();
-}
-
-fn hide_window(window: &Window) {
-    window.set_visible(false);
-}
-
 enum Destination {
     Internal,
     External,
@@ -552,25 +609,4 @@ fn host_of(url: &str) -> &str {
     let authority = after_scheme.split('/').next().unwrap_or("");
     let host = authority.rsplit('@').next().unwrap_or(authority);
     host.split(':').next().unwrap_or(host)
-}
-
-fn open_externally(url: &str) {
-    // Only hand `open` schemes we meant to support, so a hostile page cannot
-    // talk us into launching an arbitrary URL handler.
-    let allowed = ["http://", "https://", "mailto:", "tel:"]
-        .iter()
-        .any(|scheme| url.to_ascii_lowercase().starts_with(scheme));
-    if !allowed {
-        eprintln!("ytmusic: refusing to open {url}");
-        return;
-    }
-    if let Err(err) = Command::new("/usr/bin/open").args(["--", url]).spawn() {
-        eprintln!("ytmusic: could not open {url}: {err}");
-    }
-}
-
-fn reveal_in_finder(path: &str) {
-    if let Err(err) = Command::new("/usr/bin/open").args(["--", path]).spawn() {
-        eprintln!("ytmusic: could not reveal {path}: {err}");
-    }
 }

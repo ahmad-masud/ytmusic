@@ -49,7 +49,9 @@ impl PlayerState {
         }
     }
 
-    /// A compact label for the tray, truncated on a character boundary.
+    /// A compact label for the macOS menu bar, truncated on a character
+    /// boundary. Windows has no tray title, so this is unused there.
+    #[cfg(target_os = "macos")]
     pub fn tray_label(&self, max_chars: usize) -> String {
         let label = self.window_title();
         if label.chars().count() <= max_chars {

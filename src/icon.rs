@@ -1,62 +1,109 @@
-//! The menu bar glyph, rasterised at runtime.
+//! The tray and window icons, rasterised at runtime.
 //!
-//! This is the YouTube Music mark reduced to a silhouette: the filled disc,
-//! with the ring and the play triangle knocked out of it exactly as the white
-//! parts of the real logo are. The menu bar takes *template* images: AppKit uses
-//! only the alpha channel and recolours it for light and dark menu bars, which
-//! is why this is a shape rather than the red logo. A full-colour icon up there
-//! would be wrong on macOS, and illegible at 18pt besides.
+//! This is the YouTube Music mark reduced to its geometry: a filled disc with
+//! the ring and the play triangle knocked out of it, exactly where the white
+//! parts of the real logo are.
 //!
-//! `tray-icon` wants raw RGBA, and shipping a PNG would mean pulling in an
-//! image decoder for one 44×44 bitmap, so it is drawn analytically instead.
+//! It is drawn rather than decoded because shipping a PNG would mean pulling in
+//! an image decoder for one small bitmap. The two platforms want different
+//! things from it:
+//!
+//!   * macOS menu bar takes *template* images — only the alpha channel is used
+//!     and AppKit recolours it per theme, so the knockouts are transparent.
+//!   * Windows notification area and taskbar take full-colour icons, so the
+//!     knockouts are painted white and the disc is YouTube red.
 
-const SIZE: u32 = 44;
+const TRAY_SIZE: u32 = 44;
+#[cfg(target_os = "windows")]
+const WINDOW_SIZE: u32 = 64;
 const SAMPLES: u32 = 4;
 
-const CENTRE: (f64, f64) = (22.0, 22.0);
-/// The filled disc.
-const DISC: f64 = 19.0;
-/// The ring is knocked *out* of the disc, as it is in the real mark.
-const RING_GAP: (f64, f64) = (15.4, 17.2);
+const CENTRE: (f64, f64) = (0.5, 0.5);
+const DISC: f64 = 19.0 / 44.0;
+const RING_GAP: (f64, f64) = (15.4 / 44.0, 17.2 / 44.0);
+const TRIANGLE: [(f64, f64); 3] = [
+    (17.5 / 44.0, 15.0 / 44.0),
+    (17.5 / 44.0, 29.0 / 44.0),
+    (28.5 / 44.0, 22.0 / 44.0),
+];
 
-/// Play triangle, pointing right, also knocked out.
-const TRIANGLE: [(f64, f64); 3] = [(17.5, 15.0), (17.5, 29.0), (28.5, 22.0)];
+const RED: [f64; 3] = [255.0, 0.0, 51.0];
+const WHITE: [f64; 3] = [255.0, 255.0, 255.0];
 
+/// The menu bar / notification area icon.
 pub fn tray_icon() -> Result<tray_icon::Icon, tray_icon::BadIcon> {
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let alpha = (coverage(x, y) * 255.0).round().clamp(0.0, 255.0) as u8;
-            // Template images ignore colour; white keeps the premultiplied
-            // edges clean if that ever changes.
-            rgba.extend_from_slice(&[255, 255, 255, alpha]);
-        }
-    }
-    tray_icon::Icon::from_rgba(rgba, SIZE, SIZE)
+    let colored = !cfg!(target_os = "macos");
+    tray_icon::Icon::from_rgba(render(TRAY_SIZE, colored), TRAY_SIZE, TRAY_SIZE)
 }
 
-/// Fraction of the pixel covered by the glyph, by supersampling.
-fn coverage(px: u32, py: u32) -> f64 {
-    let mut hits = 0u32;
+/// The title bar / taskbar / Alt-Tab icon. macOS takes this from the bundle's
+/// .icns instead, so it is only used on Windows.
+#[cfg(target_os = "windows")]
+pub fn window_icon() -> Option<tao::window::Icon> {
+    tao::window::Icon::from_rgba(render(WINDOW_SIZE, true), WINDOW_SIZE, WINDOW_SIZE).ok()
+}
+
+/// Supersampled RGBA. Coordinates are normalised so one description serves
+/// every size.
+fn render(size: u32, colored: bool) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
     let step = 1.0 / f64::from(SAMPLES);
-    for sy in 0..SAMPLES {
-        for sx in 0..SAMPLES {
-            let x = f64::from(px) + (f64::from(sx) + 0.5) * step;
-            let y = f64::from(py) + (f64::from(sy) + 0.5) * step;
-            if inside(x, y) {
-                hits += 1;
+
+    for y in 0..size {
+        for x in 0..size {
+            let mut color = [0.0f64; 3];
+            let mut alpha = 0.0f64;
+            let mut covered = 0.0f64;
+
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let px = (f64::from(x) + (f64::from(sx) + 0.5) * step) / f64::from(size);
+                    let py = (f64::from(y) + (f64::from(sy) + 0.5) * step) / f64::from(size);
+
+                    let distance = (px - CENTRE.0).hypot(py - CENTRE.1);
+                    if distance > DISC {
+                        continue;
+                    }
+                    let knocked_out = (distance >= RING_GAP.0 && distance <= RING_GAP.1)
+                        || in_triangle(px, py);
+
+                    let sample = if colored {
+                        // The whole disc is opaque; the knockouts are white.
+                        if knocked_out { WHITE } else { RED }
+                    } else if knocked_out {
+                        // Template image: knockouts are holes.
+                        continue;
+                    } else {
+                        WHITE
+                    };
+
+                    for channel in 0..3 {
+                        color[channel] += sample[channel];
+                    }
+                    alpha += 255.0;
+                    covered += 1.0;
+                }
             }
+
+            let total = f64::from(SAMPLES * SAMPLES);
+            let (r, g, b) = if covered > 0.0 {
+                (
+                    color[0] / covered,
+                    color[1] / covered,
+                    color[2] / covered,
+                )
+            } else {
+                (255.0, 255.0, 255.0)
+            };
+            rgba.extend_from_slice(&[
+                r.round() as u8,
+                g.round() as u8,
+                b.round() as u8,
+                (alpha / total).round() as u8,
+            ]);
         }
     }
-    f64::from(hits) / f64::from(SAMPLES * SAMPLES)
-}
-
-/// Ink where the mark is red: the disc, minus the ring and the play triangle.
-fn inside(x: f64, y: f64) -> bool {
-    let distance = (x - CENTRE.0).hypot(y - CENTRE.1);
-    let in_disc = distance <= DISC;
-    let in_ring_gap = distance >= RING_GAP.0 && distance <= RING_GAP.1;
-    in_disc && !in_ring_gap && !in_triangle(x, y)
+    rgba
 }
 
 fn in_triangle(x: f64, y: f64) -> bool {

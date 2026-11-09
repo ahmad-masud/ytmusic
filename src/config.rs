@@ -16,12 +16,19 @@ fn is_web_url(url: &str) -> bool {
 }
 pub const HOME_URL: &str = "https://music.youtube.com/";
 
-/// Pretend to be Safari. WKWebView's stock user agent omits the `Safari`
-/// token, which makes YouTube serve a degraded page and makes Google's sign-in
-/// flow refuse the "embedded browser". Overridable because Google occasionally
-/// moves the goalposts.
+/// On macOS, pretend to be Safari: WKWebView's stock user agent omits the
+/// `Safari` token, which makes YouTube serve a degraded page and makes Google's
+/// sign-in flow refuse the "embedded browser". Overridable because Google
+/// occasionally moves the goalposts.
+#[cfg(target_os = "macos")]
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
      AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15";
+
+/// On Windows there is nothing to fix: WebView2 already identifies as Edge,
+/// which YouTube Music serves its full desktop experience to. Empty means
+/// "leave the engine's own user agent alone".
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_USER_AGENT: &str = "";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -137,9 +144,6 @@ impl Config {
         self.window.width = self.window.width.clamp(420.0, 10_000.0);
         self.window.height = self.window.height.clamp(360.0, 10_000.0);
         self.zoom = self.zoom.clamp(0.4, 3.0);
-        if self.user_agent.trim().is_empty() {
-            self.user_agent = DEFAULT_USER_AGENT.to_string();
-        }
         if !is_web_url(&self.start_url) {
             self.start_url = HOME_URL.to_string();
         }

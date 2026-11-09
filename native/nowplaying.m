@@ -203,19 +203,12 @@ void ytm_native_clear(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Small odds and ends that also need AppKit
+// Activation
 // ---------------------------------------------------------------------------
 
-void ytm_native_copy_text(const char *text) {
-  NSString *value = ytm_str(text);
-  dispatch_async(dispatch_get_main_queue(), ^{
-    NSPasteboard *pb = [NSPasteboard generalPasteboard];
-    [pb clearContents];
-    [pb setString:value forType:NSPasteboardTypeString];
-  });
-}
-
-// Bounce the Dock icon / bring the app forward.
+// Bring the app forward. tao can raise the window, but on macOS the
+// application itself also has to be activated or the window comes up behind
+// whatever is currently frontmost. / bring the app forward.
 void ytm_native_activate(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
     [NSApp activateIgnoringOtherApps:YES];

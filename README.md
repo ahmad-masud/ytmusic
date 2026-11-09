@@ -13,23 +13,58 @@ the two AppKit frameworks that have no usable Rust bindings.
 
 ---
 
-## Build
+## Install
+
+### Download
+
+Grab the universal build from [Releases](https://github.com/ahmad-masud/ytmusic/releases),
+unzip, and drag **YouTube Music.app** into `/Applications`.
+
+It is ad-hoc signed rather than notarised — there is no $99/year Apple
+Developer certificate behind it — so Gatekeeper blocks the first launch. Open
+the app once, then go to **System Settings ▸ Privacy & Security ▸ Open Anyway**.
+Or `xattr -dr com.apple.quarantine "/Applications/YouTube Music.app"`.
+
+### Build from source
+
+This skips the Gatekeeper step entirely, because a locally compiled binary is
+never quarantined.
 
 ```sh
 ./scripts/bundle.sh                # -> dist/YouTube Music.app
+./scripts/bundle.sh --universal    # arm64 + x86_64, for releases
 ./scripts/bundle.sh /Applications  # or install it straight away
-open "dist/YouTube Music.app"
 ```
 
 Requires a Rust toolchain and the Xcode command line tools. There are no other
 dependencies: `cargo build` compiles the Objective-C shim through the `cc`
 crate, and the icon is checked in.
 
-The bundle is **ad-hoc signed**. That matters more than it sounds: WKWebView
+The bundle is **ad-hoc signed**, which matters more than it sounds: WKWebView
 keys its cookie jar to the bundle identifier, so without a stable identity you
 would be signed out of YouTube Music on every rebuild, and
 `MediaPlayer.framework` refuses to hand an unbundled binary the Now Playing
 slot. Running `target/release/ytmusic` directly works, but you lose both.
+
+### Homebrew
+
+Not in the official `homebrew/cask` tap, and it cannot be. Three separate
+blockers, from [Acceptable Casks](https://docs.brew.sh/Acceptable-Casks) and the
+[Package Acceptance Policy](https://docs.brew.sh/Package-Acceptance-Policy):
+
+| Requirement | Status |
+|---|---|
+| Artefacts "must pass Homebrew's Gatekeeper checks and must not require ... Gatekeeper to be disabled or bypassed" | Ad-hoc signature fails on a default config. Needs a Developer ID certificate and notarisation. |
+| Notability: 90 forks, 90 watchers or 225 stars for a self-submission | Not yet |
+| Repository at least 30 days old | Not yet |
+
+A personal tap has none of those gates — the policy says software that does not
+meet the official criteria "can generally be maintained in a third-party tap".
+A ready-to-use cask lives in [`packaging/homebrew/ytmusic.rb`](packaging/homebrew/ytmusic.rb).
+
+Worth knowing: Homebrew 7 removed `--no-quarantine`, so even a tap install is
+quarantined and still prompts on first launch. Only notarisation, or building
+from source, actually removes that step.
 
 ## The icon
 
